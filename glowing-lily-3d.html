@@ -1,0 +1,445 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Glowing Lily 3D</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #050b1c; }
+  canvas { display: block; touch-action: none; cursor: grab; }
+  canvas:active { cursor: grabbing; }
+  .ui {
+    position: fixed; left: 0; right: 0; bottom: 18px;
+    display: flex; flex-direction: column; align-items: center; gap: 8px;
+    font: 13px system-ui, sans-serif; color: rgba(255,255,255,.55);
+    pointer-events: none;
+  }
+  button {
+    pointer-events: auto;
+    background: rgba(255,255,255,.08); color: #fff; border: 1px solid rgba(255,255,255,.25);
+    border-radius: 20px; padding: 8px 20px; font-size: 14px; cursor: pointer;
+    backdrop-filter: blur(6px);
+  }
+</style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+</head>
+<body>
+<div class="ui">
+  <span>Drag to rotate · scroll or pinch to zoom</span>
+  <button id="replay">Replay</button>
+</div>
+
+<script>
+// ---------- Scene / camera / renderer ----------
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x050b1c);
+scene.fog = new THREE.FogExp2(0x050b1c, 0.03);
+
+const camera = new THREE.PerspectiveCamera(48, innerWidth / innerHeight, 0.1, 200);
+camera.position.set(0, 2.6, 9.5);
+const target = new THREE.Vector3(0, 0.4, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(innerWidth, innerHeight);
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.outputEncoding = THREE.sRGBEncoding;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.1;
+document.body.appendChild(renderer.domElement);
+
+const root = new THREE.Group();     // flower + stem (rotates with the user)
+scene.add(root);
+
+// ---------- Helpers ----------
+const clamp = THREE.MathUtils.clamp;
+const easeOutCubic = k => 1 - Math.pow(1 - k, 3);
+const smooth = x => { x = clamp(x, 0, 1); return x * x * (3 - 2 * x); };
+
+function glowTexture(inner, outer) {
+  const c = document.createElement('canvas');
+  c.width = c.height = 128;
+  const g = c.getContext('2d');
+  const grad = g.createRadialGradient(64, 64, 0, 64, 64, 64);
+  grad.addColorStop(0, inner);
+  grad.addColorStop(0.35, outer);
+  grad.addColorStop(1, 'rgba(0,0,0,0)');
+  g.fillStyle = grad;
+  g.fillRect(0, 0, 128, 128);
+  const t = new THREE.CanvasTexture(c);
+  t.encoding = THREE.sRGBEncoding;
+  return t;
+}
+
+// Glittery speckle texture used as an emissive map on the petals.
+// UV: x across the petal, y along it (canvas bottom = petal base).
+function speckleTexture() {
+  const W = 512, H = 512;
+  const c = document.createElement('canvas');
+  c.width = W; c.height = H;
+  const g = c.getContext('2d');
+  g.fillStyle = '#240a4a';
+  g.fillRect(0, 0, W, H);
+
+  // golden glow rising from the base of the petal
+  const base = g.createLinearGradient(0, H, 0, 0);
+  base.addColorStop(0.0, 'rgba(255,190,40,1)');
+  base.addColorStop(0.18, 'rgba(255,140,30,0.75)');
+  base.addColorStop(0.42, 'rgba(255,90,120,0.18)');
+  base.addColorStop(1.0, 'rgba(0,0,0,0)');
+  g.fillStyle = base;
+  g.fillRect(0, 0, W, H);
+
+  // soft bright midrib
+  const mid = g.createLinearGradient(W * 0.42, 0, W * 0.58, 0);
+  mid.addColorStop(0, 'rgba(255,200,90,0)');
+  mid.addColorStop(0.5, 'rgba(255,200,90,0.35)');
+  mid.addColorStop(1, 'rgba(255,200,90,0)');
+  g.fillStyle = mid;
+  g.fillRect(W * 0.42, H * 0.05, W * 0.16, H * 0.85);
+
+  // sparkle dots
+  for (let i = 0; i < 1400; i++) {
+    const x = Math.random() * W, y = Math.random() * H;
+    const r = 0.5 + Math.random() * 1.9;
+    const roll = Math.random();
+    const col = roll < 0.6 ? '255,110,220' : roll < 0.9 ? '255,255,255' : '255,200,80';
+    g.fillStyle = `rgba(${col},${0.35 + Math.random() * 0.65})`;
+    g.beginPath(); g.arc(x, y, r, 0, Math.PI * 2); g.fill();
+  }
+  const t = new THREE.CanvasTexture(c);
+  t.encoding = THREE.sRGBEncoding;
+  t.anisotropy = 4;
+  return t;
+}
+
+// ---------- Lights ----------
+scene.add(new THREE.HemisphereLight(0x5a6cff, 0x050b1c, 0.55));
+const heart = new THREE.PointLight(0xffb020, 4, 14, 1.4);
+heart.position.set(0, 0.9, 0);
+root.add(heart);
+const violetLight = new THREE.PointLight(0x9a50ff, 2.2, 22, 1.5);
+violetLight.position.set(4, 4, 4);
+scene.add(violetLight);
+const rimLight = new THREE.PointLight(0x4a7bff, 1.4, 26, 1.5);
+rimLight.position.set(-5, 2, -3);
+scene.add(rimLight);
+
+// ---------- Tepal (petal) geometry ----------
+const C_GOLD = new THREE.Color(1.0, 0.72, 0.10);
+const C_MAG  = new THREE.Color(0.78, 0.24, 0.90);
+const C_VIO  = new THREE.Color(0.50, 0.20, 0.95);
+const C_BLUE = new THREE.Color(0.35, 0.45, 1.00);
+const C_PINK = new THREE.Color(0.95, 0.40, 0.85);
+
+function petalColor(u, v, c) {
+  const a = Math.abs(v);
+  c.copy(C_GOLD).lerp(C_MAG, smooth(u / 0.35));
+  c.lerp(C_VIO, smooth((u - 0.3) / 0.3));
+  c.lerp(C_PINK, smooth((u - 0.8) / 0.2) * 0.8);
+  c.lerp(C_BLUE, Math.pow(a, 3) * 0.55 * smooth(u / 0.3));
+  c.convertSRGBToLinear();
+}
+
+const L_DARK = new THREE.Color(0x0a3238), L_LIGHT = new THREE.Color(0x2a8a90);
+function leafColor(u, v, c) {
+  c.copy(L_DARK).lerp(L_LIGHT, Math.pow(Math.abs(v), 2) * 0.7 + (1 - Math.abs(v)) * 0.15 * u);
+  c.convertSRGBToLinear();
+}
+
+function makeTepal(len, wid, cup, bend, wave, colorFn) {
+  const su = 40, sv = 14;
+  const pos = [], col = [], uvs = [], idx = [];
+  const c = new THREE.Color();
+  for (let i = 0; i <= su; i++) {
+    const u = i / su;
+    const w = wid * Math.pow(Math.sin(Math.PI * Math.pow(u, 0.75)), 0.8);
+    for (let j = 0; j <= sv; j++) {
+      const v = (j / sv) * 2 - 1;
+      const x = v * w;
+      const y = u * len;
+      const z = bend * len * (0.25 * u * u + 1.2 * u * u * u)          // recurve backward toward the tip
+              - cup * v * v * w * 0.6                                   // cupped across the width
+              + wave * Math.sin(u * 14 + v * 2) * Math.pow(Math.abs(v), 1.5) * Math.min(1, u * 3); // ruffled edge
+      pos.push(x, y, z);
+      colorFn(u, v, c);
+      col.push(c.r, c.g, c.b);
+      uvs.push(v * 0.5 + 0.5, u);
+    }
+  }
+  for (let i = 0; i < su; i++) {
+    for (let j = 0; j < sv; j++) {
+      const a = i * (sv + 1) + j, b = a + sv + 1;
+      idx.push(a, b, a + 1, b, b + 1, a + 1);
+    }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+  g.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+  g.setIndex(idx);
+  g.computeVertexNormals();
+  return g;
+}
+
+// ---------- Flower ----------
+const flower = new THREE.Group();
+root.add(flower);
+
+const speckle = speckleTexture();
+const petalMat = new THREE.MeshPhysicalMaterial({
+  vertexColors: true, side: THREE.DoubleSide,
+  roughness: 0.32, metalness: 0.05,
+  clearcoat: 1.0, clearcoatRoughness: 0.18,
+  emissive: 0xffffff, emissiveMap: speckle, emissiveIntensity: 0.95
+});
+
+const outerGeo = makeTepal(3.4, 1.05, 0.55, 0.20, 0.07, petalColor);
+const innerGeo = makeTepal(3.1, 1.22, 0.65, 0.17, 0.09, petalColor);
+
+const tepals = [];
+for (let k = 0; k < 6; k++) {
+  const outer = k % 2 === 0;
+  const pivot = new THREE.Group();
+  pivot.rotation.y = k * (Math.PI / 3) + (outer ? 0 : 0.05);
+  const mesh = new THREE.Mesh(outer ? outerGeo : innerGeo, petalMat);
+  mesh.position.set(0, 0, 0.12);
+  mesh.rotation.z = (k % 3 - 1) * 0.04;     // slight twist so it isn't perfectly symmetric
+  pivot.add(mesh);
+  flower.add(pivot);
+  tepals.push({
+    mesh,
+    tilt: outer ? 1.18 : 0.95,
+    delay: outer ? 0.25 : 0.55,
+    ph: k * 1.3
+  });
+}
+
+// ---------- Stamens + pistil ----------
+const stamens = new THREE.Group();
+flower.add(stamens);
+const filamentMat = new THREE.MeshStandardMaterial({ color: 0xffc247, emissive: 0xff9a1f, emissiveIntensity: 0.7, roughness: 0.4 });
+const antherMat   = new THREE.MeshStandardMaterial({ color: 0x2a1206, emissive: 0x4a1c06, emissiveIntensity: 0.6, roughness: 0.55 });
+
+for (let i = 0; i < 6; i++) {
+  const a = i * (Math.PI / 3) + Math.PI / 6;
+  const ca = Math.cos(a), sa = Math.sin(a);
+  const pts = [
+    new THREE.Vector3(0, 0.05, 0),
+    new THREE.Vector3(ca * 0.25, 0.8, sa * 0.25),
+    new THREE.Vector3(ca * 0.7, 1.55, sa * 0.7),
+    new THREE.Vector3(ca * 1.15, 2.1, sa * 1.15)
+  ];
+  const curve = new THREE.CatmullRomCurve3(pts);
+  stamens.add(new THREE.Mesh(new THREE.TubeGeometry(curve, 32, 0.022, 8, false), filamentMat));
+
+  const anther = new THREE.Mesh(new THREE.SphereGeometry(1, 16, 12), antherMat);
+  anther.scale.set(0.07, 0.34, 0.07);
+  anther.position.copy(pts[3]);
+  const tan = curve.getTangent(1).normalize();
+  anther.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), tan);
+  stamens.add(anther);
+}
+
+// Pistil (the longer central rod with a purple tip)
+{
+  const pts = [
+    new THREE.Vector3(0, 0.05, 0),
+    new THREE.Vector3(0.1, 1.0, 0.08),
+    new THREE.Vector3(0.38, 1.9, 0.18),
+    new THREE.Vector3(0.78, 2.5, 0.3)
+  ];
+  const curve = new THREE.CatmullRomCurve3(pts);
+  stamens.add(new THREE.Mesh(
+    new THREE.TubeGeometry(curve, 32, 0.034, 8, false),
+    new THREE.MeshStandardMaterial({ color: 0x8a4acf, emissive: 0x5a22a8, emissiveIntensity: 0.6, roughness: 0.4 })
+  ));
+  const tip = new THREE.Mesh(
+    new THREE.SphereGeometry(1, 16, 12),
+    new THREE.MeshStandardMaterial({ color: 0x5a1fa0, emissive: 0x7a30d0, emissiveIntensity: 0.8, roughness: 0.4 })
+  );
+  tip.scale.set(0.11, 0.2, 0.11);
+  tip.position.copy(pts[3]);
+  tip.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), curve.getTangent(1).normalize());
+  stamens.add(tip);
+}
+
+// Golden glow at the heart of the flower
+const coreGlow = new THREE.Sprite(new THREE.SpriteMaterial({
+  map: glowTexture('rgba(255,225,140,1)', 'rgba(255,150,30,0.5)'),
+  blending: THREE.AdditiveBlending, transparent: true, depthWrite: false, opacity: 0
+}));
+coreGlow.position.set(0, 0.9, 0);
+coreGlow.scale.set(4.6, 4.6, 1);
+flower.add(coreGlow);
+
+// ---------- Stem + leaves ----------
+const stemCurve = new THREE.CatmullRomCurve3([
+  new THREE.Vector3(0, -0.1, 0),
+  new THREE.Vector3(0.12, -1.6, 0.1),
+  new THREE.Vector3(0.5, -3.4, 0.3),
+  new THREE.Vector3(0.75, -5.6, 0.2)
+]);
+const stemMat = new THREE.MeshStandardMaterial({ color: 0x0f4a3c, emissive: 0x06241d, roughness: 0.5 });
+root.add(new THREE.Mesh(new THREE.TubeGeometry(stemCurve, 40, 0.1, 10, false), stemMat));
+
+const leafGeo = makeTepal(3.6, 0.5, 0.3, 0.2, 0.03, leafColor);
+const leafMat = new THREE.MeshStandardMaterial({
+  vertexColors: true, side: THREE.DoubleSide, roughness: 0.35, metalness: 0.2,
+  emissive: 0x0a4a52, emissiveIntensity: 0.35
+});
+[[2.2, 1.35, -2.8], [-0.7, 1.2, -4.0]].forEach(([yaw, tilt, y]) => {
+  const pivot = new THREE.Group();
+  const p = stemCurve.getPoint(clamp((-y - 0.1) / 5.5, 0, 1));
+  pivot.position.copy(p);
+  pivot.rotation.y = yaw;
+  const leaf = new THREE.Mesh(leafGeo, leafMat);
+  leaf.rotation.x = tilt;
+  pivot.add(leaf);
+  root.add(pivot);
+});
+
+// ---------- Background glow ----------
+const backGlow = new THREE.Sprite(new THREE.SpriteMaterial({
+  map: glowTexture('rgba(110,70,255,0.5)', 'rgba(60,40,200,0.2)'),
+  blending: THREE.AdditiveBlending, transparent: true, depthWrite: false, opacity: 0.55, fog: false
+}));
+backGlow.position.set(0, 1.2, -5);
+backGlow.scale.set(22, 16, 1);
+scene.add(backGlow);
+
+// ---------- Orange embers (small sparks) ----------
+const EMBERS = 170;
+const emPos = new Float32Array(EMBERS * 3);
+const emSpd = new Float32Array(EMBERS);
+for (let i = 0; i < EMBERS; i++) {
+  const a = Math.random() * Math.PI * 2, r = 1.5 + Math.random() * 8;
+  emPos[i * 3] = Math.cos(a) * r;
+  emPos[i * 3 + 1] = -3 + Math.random() * 10;
+  emPos[i * 3 + 2] = Math.sin(a) * r - 1;
+  emSpd[i] = 0.1 + Math.random() * 0.4;
+}
+const emGeo = new THREE.BufferGeometry();
+emGeo.setAttribute('position', new THREE.BufferAttribute(emPos, 3));
+const embers = new THREE.Points(emGeo, new THREE.PointsMaterial({
+  map: glowTexture('rgba(255,200,120,1)', 'rgba(255,120,40,0.5)'),
+  size: 0.3, transparent: true, opacity: 0.9,
+  blending: THREE.AdditiveBlending, depthWrite: false, sizeAttenuation: true
+}));
+scene.add(embers);
+
+// ---------- Soft out-of-focus bokeh lights ----------
+const bokehTex = glowTexture('rgba(255,170,90,0.9)', 'rgba(255,110,50,0.28)');
+const bokeh = [];
+for (let i = 0; i < 14; i++) {
+  const s = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: bokehTex, blending: THREE.AdditiveBlending, transparent: true,
+    depthWrite: false, opacity: 0.12 + Math.random() * 0.2
+  }));
+  const sc = 0.8 + Math.random() * 2.2;
+  s.scale.set(sc, sc, 1);
+  s.position.set((Math.random() - 0.5) * 18, -2 + Math.random() * 9, -3 - Math.random() * 6);
+  scene.add(s);
+  bokeh.push({ s, ph: Math.random() * 6.28, sp: 0.15 + Math.random() * 0.3, baseY: s.position.y });
+}
+
+// ---------- Interaction ----------
+let dragging = false, lastX = 0, lastY = 0;
+let userYaw = 0, userPitch = 0, velYaw = 0;
+const dom = renderer.domElement;
+dom.addEventListener('pointerdown', e => { dragging = true; lastX = e.clientX; lastY = e.clientY; dom.setPointerCapture(e.pointerId); });
+dom.addEventListener('pointerup',   () => { dragging = false; });
+dom.addEventListener('pointermove', e => {
+  if (!dragging) return;
+  const dx = e.clientX - lastX, dy = e.clientY - lastY;
+  lastX = e.clientX; lastY = e.clientY;
+  userYaw += dx * 0.008; velYaw = dx * 0.008;
+  userPitch = clamp(userPitch + dy * 0.004, -0.2, 0.6);
+});
+dom.addEventListener('wheel', e => {
+  camera.position.z = clamp(camera.position.z + e.deltaY * 0.01, 5, 16);
+  e.preventDefault();
+}, { passive: false });
+
+const touches = new Map(); let pinchStart = 0, zStart = 0;
+dom.addEventListener('pointerdown', e => {
+  touches.set(e.pointerId, e);
+  if (touches.size === 2) {
+    const [a, b] = [...touches.values()];
+    pinchStart = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+    zStart = camera.position.z; dragging = false;
+  }
+});
+dom.addEventListener('pointermove', e => {
+  if (touches.has(e.pointerId)) touches.set(e.pointerId, e);
+  if (touches.size === 2) {
+    const [a, b] = [...touches.values()];
+    const d = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+    camera.position.z = clamp(zStart * pinchStart / d, 5, 16);
+  }
+});
+['pointerup', 'pointercancel'].forEach(ev => dom.addEventListener(ev, e => touches.delete(e.pointerId)));
+
+// ---------- Animation ----------
+const clock = new THREE.Clock();
+let t0 = 0;
+document.getElementById('replay').addEventListener('click', () => { t0 = clock.getElapsedTime(); });
+
+function animate() {
+  requestAnimationFrame(animate);
+  const now = clock.getElapsedTime();
+  const t = now - t0;
+
+  if (!dragging) { userYaw += velYaw; velYaw *= 0.95; }
+  root.rotation.y = userYaw + Math.sin(now * 0.25) * 0.4;
+  root.rotation.x = userPitch * 0.4;
+  camera.position.y = 2.6 + userPitch * 4;
+  camera.lookAt(target);
+
+  // tepals unfurl (outer ones first) and then breathe
+  tepals.forEach(p => {
+    const k = clamp((t - p.delay) / 2.8, 0, 1);
+    const e = easeOutCubic(k);
+    const sway = k >= 1 ? Math.sin(now * 0.8 + p.ph) * 0.025 : 0;
+    p.mesh.rotation.x = p.tilt * (0.1 + 0.9 * e) + sway;
+    const s = 0.72 + 0.28 * e;
+    p.mesh.scale.setScalar(s);
+  });
+
+  // stamens rise and spread
+  const ks = easeOutCubic(clamp((t - 0.9) / 2.4, 0, 1));
+  stamens.scale.setScalar(0.25 + 0.75 * ks);
+
+  // glow
+  const pulse = 0.88 + 0.12 * Math.sin(now * 1.8);
+  const open = clamp((t - 0.6) / 2.6, 0, 1);
+  coreGlow.material.opacity = open * pulse;
+  heart.intensity = (1.2 + 3.2 * open) * pulse;
+  petalMat.emissiveIntensity = 0.6 + 0.4 * open + 0.08 * Math.sin(now * 1.8);
+
+  // embers drift upward and twinkle
+  for (let i = 0; i < EMBERS; i++) {
+    emPos[i * 3 + 1] += emSpd[i] * 0.012;
+    emPos[i * 3] += Math.sin(now * 0.5 + i) * 0.0015;
+    if (emPos[i * 3 + 1] > 7.5) emPos[i * 3 + 1] = -3;
+  }
+  emGeo.attributes.position.needsUpdate = true;
+  embers.material.opacity = 0.7 + 0.25 * Math.sin(now * 2.4);
+
+  // bokeh lights float slowly
+  bokeh.forEach(b => {
+    b.s.position.y = b.baseY + Math.sin(now * b.sp + b.ph) * 0.5;
+    b.s.material.opacity = (0.14 + 0.1 * Math.sin(now * b.sp * 2 + b.ph)) * 1.2;
+  });
+
+  renderer.render(scene, camera);
+}
+animate();
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+</script>
+</body>
+</html>
